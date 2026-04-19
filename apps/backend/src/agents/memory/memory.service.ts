@@ -1,8 +1,15 @@
-import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
-import { InMemoryStore, MemorySaver } from "@langchain/langgraph";
+import {
+  Injectable,
+  Inject,
+  Logger,
+  OnModuleInit,
+} from "@nestjs/common";
+import { MemorySaver, type BaseStore } from "@langchain/langgraph";
 import type { FileData } from "deepagents";
+import { DatabaseService } from "../../database/database.service";
+import { SqliteStore } from "../../database/sqlite-store";
 
-/** Create a FileData object for seeding into the InMemoryStore. */
+/** Create a FileData object for seeding into the store. */
 function createFileData(content: string): FileData {
   const now = new Date().toISOString();
   return {
@@ -13,43 +20,92 @@ function createFileData(content: string): FileData {
 }
 
 /**
- * AgentMemoryService — manages the InMemoryStore and MemorySaver for deepagents.
+ * AgentMemoryService — owns the persistent `BaseStore` and thread-state
+ * checkpointer used by every per-user deep agent.
  *
- * Seeds initial memory files (agent persona, empty taste/diet profiles)
- * and skill files into the store on startup.
- *
- * Phase 0: InMemoryStore (data lost on restart).
- * Future: PostgreSQL-backed store for persistence across restarts.
+ * Architecture:
+ *   - The store is a {@link SqliteStore} backed by the same SQLite file
+ *     used for users / message log. This means taste profiles, diet
+ *     plans, AGENT.md, etc. survive process restarts.
+ *   - Namespaces split into TWO planes:
+ *       (a) GLOBAL skills, shared across all users:
+ *             ["mealprep-agent", "skills"]
+ *       (b) PER-USER memory, isolated per Telegram / WhatsApp user:
+ *             ["mealprep-agent", "user", "<dbUserId>"]
+ *   - Global skills are seeded once at startup.
+ *     Per-user files are seeded the first time a user talks to the bot.
+ *   - The checkpointer remains in-process (`MemorySaver`). Per-user
+ *     thread_ids are already persisted via `users.thread_id` in SQLite,
+ *     so if we ever swap in a SQL-backed checkpointer conversations
+ *     would resume across restarts too. Currently, only long-term
+ *     memory (taste / diet / AGENT.md) persists — recent chat turns
+ *     reset on restart. That's an acceptable trade and the user's
+ *     learned preferences are the expensive thing to keep.
  */
 @Injectable()
 export class AgentMemoryService implements OnModuleInit {
   private readonly logger = new Logger(AgentMemoryService.name);
 
-  /** Shared store for all agent memory and skills */
-  readonly store = new InMemoryStore();
+  /** Shared persistent store for all agent memory + skills. */
+  store!: BaseStore;
 
-  /** Checkpointer for thread state + human-in-the-loop */
+  /** In-process checkpointer for per-thread graph state. */
   readonly checkpointer = new MemorySaver();
 
-  /** Namespace for agent-scoped data (shared across all users) */
+  /** Namespace for GLOBAL skills (shared across users). */
+  static readonly SKILLS_NAMESPACE = ["mealprep-agent", "skills"];
+
+  /** Namespace prefix for PER-USER memory trees. */
+  static readonly USER_NAMESPACE_PREFIX = ["mealprep-agent", "user"];
+
+  /** Legacy alias — kept for any callers that still reference the old
+   *  shared namespace during the migration. New code should pick either
+   *  {@link SKILLS_NAMESPACE} or {@link userNamespace}. */
   static readonly AGENT_NAMESPACE = ["mealprep-agent"];
 
+  /** Remember which user namespaces we've already seeded this process. */
+  private readonly seededUsers = new Set<string>();
+
+  constructor(
+    @Inject(DatabaseService) private readonly dbs: DatabaseService,
+  ) {}
+
   async onModuleInit() {
-    await this.seedMemoryFiles();
-    await this.seedSkillFiles();
+    this.store = new SqliteStore(this.dbs.db);
+    await this.seedGlobalSkills();
     this.logger.log(
-      "Agent memory seeded (InMemoryStore — data resets on restart)",
+      "Agent memory ready (SqliteStore — persistent across restarts). " +
+        "Per-user memory seeded lazily on first message.",
     );
   }
 
-  // -------------------------------------------------------------------
-  // Seed initial memory files
-  // -------------------------------------------------------------------
+  /** Build the user-scoped namespace used for `/memories/`, `/taste/`, etc. */
+  static userNamespace(dbUserId: number | string): string[] {
+    return [...AgentMemoryService.USER_NAMESPACE_PREFIX, String(dbUserId)];
+  }
 
-  private async seedMemoryFiles() {
-    const ns = AgentMemoryService.AGENT_NAMESPACE;
+  /**
+   * Seed this user's initial memory files (AGENT.md, empty taste profile,
+   * etc.) exactly once per user per process. Called from the orchestrator
+   * when an agent is instantiated for a user for the first time.
+   *
+   * Idempotent: checks whether `/memories/AGENT.md` already exists for
+   * the user before writing, so restarts with pre-existing data do not
+   * clobber learned preferences.
+   */
+  async ensureUserMemorySeeded(dbUserId: number | string): Promise<void> {
+    const userKey = String(dbUserId);
+    if (this.seededUsers.has(userKey)) return;
 
-    // Main agent persona / accumulated knowledge
+    const ns = AgentMemoryService.userNamespace(dbUserId);
+
+    // Fast path: already seeded in a previous process run.
+    const existing = await this.store.get(ns, "/memories/AGENT.md");
+    if (existing) {
+      this.seededUsers.add(userKey);
+      return;
+    }
+
     await this.store.put(
       ns,
       "/memories/AGENT.md",
@@ -75,7 +131,6 @@ export class AgentMemoryService implements OnModuleInit {
       ),
     );
 
-    // Empty taste profile template
     await this.store.put(
       ns,
       "/taste/profile.md",
@@ -102,18 +157,19 @@ export class AgentMemoryService implements OnModuleInit {
       ),
     );
 
-    // Empty taste feedback log
     await this.store.put(
       ns,
       "/taste/feedback-log.md",
       createFileData(
-        ["# Meal Feedback Log", "", "<!-- Entries added by taste-learner -->", ""].join(
-          "\n",
-        ),
+        [
+          "# Meal Feedback Log",
+          "",
+          "<!-- Entries added by taste-learner -->",
+          "",
+        ].join("\n"),
       ),
     );
 
-    // Empty diet plan
     await this.store.put(
       ns,
       "/diet/active-plan.md",
@@ -134,18 +190,19 @@ export class AgentMemoryService implements OnModuleInit {
       ),
     );
 
-    // Empty chef communication log
     await this.store.put(
       ns,
       "/chat-history/chef-log.md",
       createFileData(
-        ["# Chef Communication Log", "", "<!-- Entries added by chef-comm -->", ""].join(
-          "\n",
-        ),
+        [
+          "# Chef Communication Log",
+          "",
+          "<!-- Entries added by chef-comm -->",
+          "",
+        ].join("\n"),
       ),
     );
 
-    // Empty order history
     await this.store.put(
       ns,
       "/orders/history.md",
@@ -159,7 +216,6 @@ export class AgentMemoryService implements OnModuleInit {
       ),
     );
 
-    // Empty social events
     await this.store.put(
       ns,
       "/social/events.md",
@@ -172,14 +228,21 @@ export class AgentMemoryService implements OnModuleInit {
         ].join("\n"),
       ),
     );
+
+    this.seededUsers.add(userKey);
+    this.logger.log(`Seeded per-user memory for user=${userKey}`);
   }
 
-  // -------------------------------------------------------------------
-  // Seed skill files (SKILL.md for each capability)
-  // -------------------------------------------------------------------
+  // ----------------------------------------------------------------
+  // Global skills — seeded ONCE, shared across all users.
+  // ----------------------------------------------------------------
 
-  private async seedSkillFiles() {
-    const ns = AgentMemoryService.AGENT_NAMESPACE;
+  private async seedGlobalSkills() {
+    const ns = AgentMemoryService.SKILLS_NAMESPACE;
+
+    // Idempotent: skip if already seeded in a previous run.
+    const marker = await this.store.get(ns, "/skills/indian-cuisine/SKILL.md");
+    if (marker) return;
 
     await this.store.put(
       ns,
@@ -326,5 +389,7 @@ export class AgentMemoryService implements OnModuleInit {
         ].join("\n"),
       ),
     );
+
+    this.logger.log("Global skills seeded");
   }
 }

@@ -13,7 +13,8 @@ export type MessageContentType =
   | "document"
   | "sticker"
   | "location"
-  | "reaction";
+  | "reaction"
+  | "web_app_data";
 
 /**
  * A normalized incoming message from any platform.
@@ -54,6 +55,13 @@ export interface IncomingMessage {
 
   /** Location data */
   location?: { latitude: number; longitude: number };
+
+  /**
+   * Raw string payload sent back from a Telegram Mini App via
+   * `Telegram.WebApp.sendData(...)`. Always expected to be JSON —
+   * consumers should JSON.parse defensively.
+   */
+  webAppData?: string;
 
   /** Timestamp */
   timestamp: Date;
@@ -96,6 +104,18 @@ export interface OutgoingMessage {
 
   /** Reply to a specific message ID */
   replyToMessageId?: string;
+
+  /**
+   * If set, attach a single one-time reply keyboard with a Telegram
+   * Mini App button. Clicking it opens `url` inside the Telegram client
+   * and the Mini App can post data back via `tg.sendData(...)`.
+   *
+   * Ignored on platforms that don't support Mini Apps (WhatsApp).
+   */
+  webAppButton?: {
+    text: string;
+    url: string;
+  };
 }
 
 /**

@@ -17,6 +17,7 @@ import type {
 } from "../messaging/messaging.types";
 import { MessagingService } from "../messaging/messaging.service";
 import { UsersService } from "../database/users.service";
+import { normalizedToTelegramHtml } from "../messaging/formatting";
 
 @Injectable()
 export class TelegramService
@@ -75,6 +76,16 @@ export class TelegramService
     this.bot.on("sticker", (ctx) => this.handleMessage(ctx, "sticker"));
     this.bot.on("location", (ctx) => this.handleMessage(ctx, "location"));
 
+    // Telegram Mini App → bot: Telegram.WebApp.sendData(...) arrives as a
+    // regular message whose `web_app_data` field holds the payload string.
+    this.bot.on("message", (ctx, next) => {
+      const msg: any = ctx.message;
+      if (msg && "web_app_data" in msg && msg.web_app_data) {
+        return this.handleMessage(ctx, "web_app_data");
+      }
+      return next?.();
+    });
+
     // Telegraf's launch() is a blocking long-poll loop that never resolves,
     // AND it calls process.once('SIGINT'/'SIGTERM') which throws under Bun.
     //
@@ -116,7 +127,7 @@ export class TelegramService
     const chatId = message.chatId;
 
     try {
-      const replyParams = message.replyToMessageId
+      const replyParams: Record<string, any> = message.replyToMessageId
         ? {
             reply_parameters: {
               message_id: parseInt(message.replyToMessageId),
@@ -124,13 +135,40 @@ export class TelegramService
           }
         : {};
 
+      // Attach a Mini App button as a one-time reply keyboard, if
+      // requested. Keyboard-button-launched Mini Apps are the only kind
+      // that can post data back via `sendData`.
+      if (message.webAppButton) {
+        replyParams.reply_markup = {
+          keyboard: [
+            [
+              {
+                text: message.webAppButton.text,
+                web_app: { url: message.webAppButton.url },
+              },
+            ],
+          ],
+          resize_keyboard: true,
+          one_time_keyboard: true,
+          is_persistent: false,
+        };
+      }
+
+      // Render the normalized chat format into Telegram HTML so
+      // `*bold*` and `_italic_` actually look bold/italic.
+      const htmlText = message.text
+        ? normalizedToTelegramHtml(message.text)
+        : "";
+      const htmlCaption =
+        message.caption != null
+          ? normalizedToTelegramHtml(message.caption)
+          : message.text != null
+            ? normalizedToTelegramHtml(message.text)
+            : undefined;
+
       switch (message.type) {
         case "text":
-          await this.bot.telegram.sendMessage(
-            chatId,
-            message.text ?? "",
-            replyParams,
-          );
+          await this.sendTextSafe(chatId, htmlText, replyParams);
           break;
 
         case "image":
@@ -139,7 +177,8 @@ export class TelegramService
               chatId,
               { source: message.media },
               {
-                caption: message.caption ?? message.text,
+                caption: htmlCaption,
+                parse_mode: "HTML",
                 ...replyParams,
               },
             );
@@ -162,7 +201,8 @@ export class TelegramService
               chatId,
               { source: message.media },
               {
-                caption: message.caption ?? message.text,
+                caption: htmlCaption,
+                parse_mode: "HTML",
                 ...replyParams,
               },
             );
@@ -177,17 +217,17 @@ export class TelegramService
                 source: message.media,
                 filename: message.mediaFilename ?? "file",
               },
-              { caption: message.caption, ...replyParams },
+              {
+                caption: htmlCaption,
+                parse_mode: "HTML",
+                ...replyParams,
+              },
             );
           }
           break;
 
         default:
-          await this.bot.telegram.sendMessage(
-            chatId,
-            message.text ?? "",
-            replyParams,
-          );
+          await this.sendTextSafe(chatId, htmlText, replyParams);
       }
     } catch (error) {
       this.logger.error(
@@ -219,7 +259,19 @@ export class TelegramService
   // ─── Message handling ───────────────────────────────────────────
 
   private async handleMessage(ctx: Context, type: MessageContentType) {
+    // Log the raw incoming update FIRST — before any normalization, media
+    // download, DB writes, user upsert, or agent routing. This guarantees
+    // we always see that a message arrived even if downstream processing
+    // errors out.
+    this.logIncoming(ctx, type);
+
     if (!ctx.message || !ctx.from) return;
+
+    // Show "typing…" to the user while we process — deferred by a few
+    // hundred ms so instant replies don't produce a typing flash, and
+    // refreshed periodically because Telegram auto-clears the action
+    // after ~5s.
+    const typing = this.startTypingIndicator(ctx.message.chat.id);
 
     try {
       const normalized = await this.normalizeMessage(ctx, type);
@@ -228,6 +280,124 @@ export class TelegramService
       }
     } catch (error) {
       this.logger.error(`Error processing Telegram message: ${error}`);
+    } finally {
+      typing.stop();
+    }
+  }
+
+  /**
+   * Send a text message using `parse_mode: "HTML"`, falling back to
+   * plain text if Telegram complains about the markup (unmatched entity,
+   * unsupported tag, etc.). This guarantees the user always gets the
+   * content even if formatting fails.
+   */
+  private async sendTextSafe(
+    chatId: number | string,
+    html: string,
+    extra: Record<string, any>,
+  ): Promise<void> {
+    if (!this.bot) return;
+    try {
+      await this.bot.telegram.sendMessage(chatId, html, {
+        parse_mode: "HTML",
+        ...extra,
+      });
+      return;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (/parse|entity/i.test(msg)) {
+        this.logger.warn(
+          `HTML parse failed, falling back to plain text: ${msg}`,
+        );
+        const plain = html
+          .replace(/<[^>]+>/g, "")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&amp;/g, "&");
+        await this.bot.telegram.sendMessage(chatId, plain, extra);
+        return;
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Start a "typing…" chat-action loop for a chat. Returns a handle with
+   * `stop()` that cancels the loop. Safe to call repeatedly; failures are
+   * swallowed so the indicator never breaks message handling.
+   *
+   * Behaviour:
+   *   - t=0ms:    scheduled (deferred so very-fast replies don't flash)
+   *   - t=300ms:  first sendChatAction("typing") fires
+   *   - then every 4s we re-send (Telegram auto-clears "typing" after 5s)
+   *   - stop()    cancels any pending timer and any interval
+   */
+  private startTypingIndicator(chatId: number | string): { stop: () => void } {
+    let stopped = false;
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    const send = () => {
+      if (stopped || !this.bot) return;
+      this.bot.telegram
+        .sendChatAction(chatId, "typing")
+        .catch((e) => this.logger.debug(`sendChatAction failed: ${e}`));
+    };
+
+    const initial = setTimeout(() => {
+      if (stopped) return;
+      send();
+      interval = setInterval(send, 4000);
+    }, 300);
+
+    return {
+      stop: () => {
+        stopped = true;
+        clearTimeout(initial);
+        if (interval) clearInterval(interval);
+      },
+    };
+  }
+
+  /**
+   * Immediate, side-effect-free log line emitted the moment a message
+   * arrives from Telegram. Kept defensive (no throwing) so logging never
+   * breaks message handling.
+   */
+  private logIncoming(ctx: Context, type: MessageContentType) {
+    try {
+      const msg: any = ctx.message;
+      const from: any = ctx.from;
+
+      const senderId = from?.id ?? "?";
+      const senderName =
+        [from?.first_name, from?.last_name].filter(Boolean).join(" ").trim() ||
+        from?.username ||
+        String(senderId);
+      const chatId = msg?.chat?.id ?? "?";
+      const chatType = msg?.chat?.type ?? "?";
+      const messageId = msg?.message_id ?? "?";
+
+      // Pull the best "preview" text we can — text body, caption, or
+      // web-app payload — so the log line is informative at a glance.
+      let preview: string | undefined;
+      if (msg) {
+        if (typeof msg.text === "string") preview = msg.text;
+        else if (typeof msg.caption === "string") preview = msg.caption;
+        else if (msg.web_app_data?.data) preview = msg.web_app_data.data;
+      }
+      const previewTrimmed = preview
+        ? preview.replace(/\s+/g, " ").slice(0, 120) +
+          (preview.length > 120 ? "…" : "")
+        : "";
+
+      this.logger.log(
+        `⇢ IN [${type}] msg=${messageId} chat=${chatId}(${chatType}) ` +
+          `from=${senderName}(${senderId})` +
+          (previewTrimmed ? ` — "${previewTrimmed}"` : ""),
+      );
+    } catch (e) {
+      // Logging must never throw.
+      this.logger.debug(`logIncoming error: ${e}`);
     }
   }
 
@@ -345,6 +515,17 @@ export class TelegramService
       }
     }
 
+    // Telegram Mini App payload — `msg.web_app_data.data` is the string
+    // `Telegram.WebApp.sendData(...)` posted from the browser.
+    let webAppData: string | undefined;
+    if (type === "web_app_data" && "web_app_data" in (msg as any)) {
+      const wad = (msg as any).web_app_data;
+      if (wad?.data && typeof wad.data === "string") {
+        webAppData = wad.data;
+        text = wad.data; // also expose as text for downstream logging
+      }
+    }
+
     return {
       id: msg.message_id.toString(),
       platform: "telegram",
@@ -358,6 +539,7 @@ export class TelegramService
       mediaMimeType,
       mediaFilename,
       location,
+      webAppData,
       timestamp: new Date(msg.date * 1000),
       raw: msg,
       dbUserId,

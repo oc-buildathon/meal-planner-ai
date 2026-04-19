@@ -35,4 +35,13 @@ export default () => ({
     enabled: process.env.TELEGRAM_ENABLED === "true",
     botToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
   },
+
+  // Telegram Mini App (Web App) — used by the participant-picker UI.
+  //   WEBAPP_URL must be HTTPS and publicly reachable from user phones;
+  //   during dev, expose the backend via ngrok / cloudflared / tailscale
+  //   funnel and set WEBAPP_URL to that HTTPS URL.
+  webapp: {
+    enabled: process.env.WEBAPP_ENABLED === "true",
+    url: process.env.WEBAPP_URL ?? "",
+  },
 });

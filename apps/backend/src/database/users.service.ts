@@ -16,6 +16,13 @@ export interface UserRow {
   language_code: string | null;
   is_bot: number;
   is_group: number;
+  /**
+   * 1 = a seeded demo persona (Arjun, Priya, …) that doesn't correspond
+   * to a real phone/account. Personas appear in group-meal pickers but
+   * we auto-generate their invite responses from their stored profile
+   * instead of trying to DM them.
+   */
+  is_persona: number;
   thread_id: string | null;
   message_count: number;
   created_at: string;
@@ -32,6 +39,7 @@ export interface UpsertUserInput {
   languageCode?: string | null;
   isBot?: boolean;
   isGroup?: boolean;
+  isPersona?: boolean;
 }
 
 /**
@@ -58,11 +66,11 @@ export class UsersService {
     const stmt = db.query<UserRow, any>(`
       INSERT INTO users (
         platform, platform_user_id, chat_id, username,
-        first_name, last_name, language_code, is_bot, is_group,
+        first_name, last_name, language_code, is_bot, is_group, is_persona,
         message_count, created_at, last_seen_at
       ) VALUES (
         $platform, $platformUserId, $chatId, $username,
-        $firstName, $lastName, $languageCode, $isBot, $isGroup,
+        $firstName, $lastName, $languageCode, $isBot, $isGroup, $isPersona,
         1, datetime('now'), datetime('now')
       )
       ON CONFLICT(platform, platform_user_id) DO UPDATE SET
@@ -73,6 +81,7 @@ export class UsersService {
         language_code = COALESCE(excluded.language_code, users.language_code),
         is_bot        = excluded.is_bot,
         is_group      = excluded.is_group,
+        is_persona    = excluded.is_persona,
         message_count = users.message_count + 1,
         last_seen_at  = datetime('now')
       RETURNING *;
@@ -88,6 +97,7 @@ export class UsersService {
       $languageCode: input.languageCode ?? null,
       $isBot: input.isBot ? 1 : 0,
       $isGroup: input.isGroup ? 1 : 0,
+      $isPersona: input.isPersona ? 1 : 0,
     });
 
     if (!row) {
@@ -105,6 +115,26 @@ export class UsersService {
       this.dbs.db
         .query<UserRow, any>(`SELECT * FROM users WHERE id = $id`)
         .get({ $id: id }) ?? null
+    );
+  }
+
+  /**
+   * Find a user by their @username (case-insensitive, optional leading `@`).
+   * Used by `fetch_friend_palette` to resolve names in prompts like
+   * "plan a meal with @priya".
+   */
+  findByUsername(username: string): UserRow | null {
+    const u = username.trim().replace(/^@/, "").toLowerCase();
+    if (!u) return null;
+    return (
+      this.dbs.db
+        .query<UserRow, any>(
+          `SELECT * FROM users
+           WHERE LOWER(username) = $u
+           ORDER BY last_seen_at DESC
+           LIMIT 1`,
+        )
+        .get({ $u: u }) ?? null
     );
   }
 

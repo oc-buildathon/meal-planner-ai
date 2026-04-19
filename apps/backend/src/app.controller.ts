@@ -4,6 +4,7 @@ import { LlmService } from "./llm/llm.service";
 import { OrchestratorService } from "./agents/orchestrator.service";
 import { UsersService } from "./database/users.service";
 import { MessageLogService } from "./database/message-log.service";
+import { GroupMealsService } from "./database/group-meals.service";
 
 @Controller()
 export class AppController {
@@ -13,6 +14,7 @@ export class AppController {
     @Inject(OrchestratorService) private readonly orchestrator: OrchestratorService,
     @Inject(UsersService) private readonly users: UsersService,
     @Inject(MessageLogService) private readonly messageLog: MessageLogService,
+    @Inject(GroupMealsService) private readonly groupMeals: GroupMealsService,
   ) {}
 
   @Get()
@@ -54,6 +56,19 @@ export class AppController {
     return {
       user: this.users.findById(id),
       messages: this.messageLog.recentForUser(id, n),
+    };
+  }
+
+  /** GET /group-meals/:id — inspect a group meal request. */
+  @Get("group-meals")
+  groupMeal(@Query("requestId") requestId: string) {
+    const id = parseInt(requestId, 10);
+    if (!id) return { error: "requestId query param is required" };
+    const request = this.groupMeals.findRequest(id);
+    if (!request) return { error: `request ${id} not found` };
+    return {
+      request,
+      participants: this.groupMeals.getParticipants(id),
     };
   }
 
