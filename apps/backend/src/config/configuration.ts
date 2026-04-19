@@ -1,6 +1,12 @@
 export default () => ({
   port: parseInt(process.env.PORT ?? "3000", 10),
 
+  // SQLite database — stores users, thread IDs, and (optional) message log.
+  // Directory is auto-created on startup.
+  database: {
+    path: process.env.DATABASE_PATH ?? "./data/mealprep.db",
+  },
+
   // Deep Agent model — uses "provider:model" format (e.g. "openai:gpt-4o", "anthropic:claude-sonnet-4-6")
   // The provider's API key env var must also be set (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
   agent: {

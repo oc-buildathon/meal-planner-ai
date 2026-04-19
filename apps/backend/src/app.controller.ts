@@ -1,7 +1,9 @@
-import { Controller, Get, Post, Body, Inject } from "@nestjs/common";
+import { Controller, Get, Post, Body, Inject, Query } from "@nestjs/common";
 import { MessagingService } from "./messaging/messaging.service";
 import { LlmService } from "./llm/llm.service";
 import { OrchestratorService } from "./agents/orchestrator.service";
+import { UsersService } from "./database/users.service";
+import { MessageLogService } from "./database/message-log.service";
 
 @Controller()
 export class AppController {
@@ -9,6 +11,8 @@ export class AppController {
     @Inject(MessagingService) private readonly messagingService: MessagingService,
     @Inject(LlmService) private readonly llmService: LlmService,
     @Inject(OrchestratorService) private readonly orchestrator: OrchestratorService,
+    @Inject(UsersService) private readonly users: UsersService,
+    @Inject(MessageLogService) private readonly messageLog: MessageLogService,
   ) {}
 
   @Get()
@@ -27,6 +31,29 @@ export class AppController {
       agent,
       llm,
       adapters,
+      users: { total: this.users.count() },
+    };
+  }
+
+  /** GET /users — list known users (most recently active first). */
+  @Get("users")
+  listUsers(@Query("limit") limit?: string) {
+    const n = limit ? Math.min(parseInt(limit, 10) || 50, 500) : 50;
+    return { total: this.users.count(), users: this.users.list(n) };
+  }
+
+  /** GET /users/:id/messages — recent message log for a user. */
+  @Get("users/messages")
+  userMessages(
+    @Query("userId") userId: string,
+    @Query("limit") limit?: string,
+  ) {
+    const id = parseInt(userId, 10);
+    if (!id) return { error: "userId query param is required" };
+    const n = limit ? Math.min(parseInt(limit, 10) || 50, 500) : 50;
+    return {
+      user: this.users.findById(id),
+      messages: this.messageLog.recentForUser(id, n),
     };
   }
 

@@ -15,6 +15,7 @@ import { LlmService } from "../llm/llm.service";
 import { MessagingService } from "../messaging/messaging.service";
 import type { IncomingMessage, Platform } from "../messaging/messaging.types";
 import { AgentMemoryService } from "./memory/memory.service";
+import { UsersService } from "../database/users.service";
 
 // Subagents
 import {
@@ -59,6 +60,7 @@ export class OrchestratorService implements OnModuleInit {
     @Inject(LlmService) private readonly llm: LlmService,
     @Inject(AgentMemoryService) private readonly memory: AgentMemoryService,
     @Inject(MessagingService) private readonly messaging: MessagingService,
+    @Inject(UsersService) private readonly users: UsersService,
   ) {}
 
   async onModuleInit() {
@@ -171,7 +173,7 @@ export class OrchestratorService implements OnModuleInit {
       ? `[${message.senderName}]: ${message.text}`
       : message.text;
 
-    const threadId = this.getOrCreateThread(chatId);
+    const threadId = this.getOrCreateThread(chatId, message.dbUserId);
     const config = { configurable: { thread_id: threadId } };
 
     try {
@@ -301,12 +303,44 @@ export class OrchestratorService implements OnModuleInit {
   // Thread management
   // -------------------------------------------------------------------
 
-  private getOrCreateThread(chatId: string): string {
-    if (!this.threadMap.has(chatId)) {
-      this.threadMap.set(chatId, `thread-${chatId}-${Date.now()}`);
-      this.logger.debug(`New thread for chat ${chatId}`);
+  /**
+   * Resolve the langgraph thread_id for this chat.
+   *
+   * Priority:
+   *   1. In-memory cache (hot path — same process lifecycle)
+   *   2. SQLite `users.thread_id` (survives restarts)
+   *   3. Generate a new id, persist it to SQLite (if we have a dbUserId), cache it.
+   */
+  private getOrCreateThread(chatId: string, dbUserId?: number): string {
+    const cached = this.threadMap.get(chatId);
+    if (cached) return cached;
+
+    // Look up persisted thread id from SQLite if we have a user row
+    if (dbUserId !== undefined) {
+      try {
+        const row = this.users.findById(dbUserId);
+        if (row?.thread_id) {
+          this.threadMap.set(chatId, row.thread_id);
+          return row.thread_id;
+        }
+      } catch (e) {
+        this.logger.debug(`Thread lookup failed for user ${dbUserId}: ${e}`);
+      }
     }
-    return this.threadMap.get(chatId)!;
+
+    const fresh = `thread-${chatId}-${Date.now()}`;
+    this.threadMap.set(chatId, fresh);
+
+    if (dbUserId !== undefined) {
+      try {
+        this.users.setThreadId(dbUserId, fresh);
+      } catch (e) {
+        this.logger.warn(`Persist thread id failed for user ${dbUserId}: ${e}`);
+      }
+    }
+
+    this.logger.debug(`New thread ${fresh} for chat ${chatId}`);
+    return fresh;
   }
 
   // -------------------------------------------------------------------

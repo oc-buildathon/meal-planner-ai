@@ -60,6 +60,13 @@ export interface IncomingMessage {
 
   /** Raw platform-specific message object (for edge cases) */
   raw?: unknown;
+
+  /**
+   * Internal primary-key of the user row in the SQLite `users` table.
+   * Set by the adapter after upsert; consumers (orchestrator, logs) use this
+   * as the canonical user identifier instead of the platform-specific id.
+   */
+  dbUserId?: number;
 }
 
 /**

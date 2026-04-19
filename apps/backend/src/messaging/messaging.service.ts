@@ -7,6 +7,8 @@ import type {
   Platform,
 } from "./messaging.types";
 import { LlmService } from "../llm/llm.service";
+import { UsersService } from "../database/users.service";
+import { MessageLogService } from "../database/message-log.service";
 
 /**
  * Callback signature for the deep agent orchestrator.
@@ -31,7 +33,11 @@ export class MessagingService implements OnModuleInit {
   private adapters = new Map<Platform, MessagingAdapter>();
   private messageProcessor: MessageProcessor | null = null;
 
-  constructor(@Inject(LlmService) private readonly llm: LlmService) {}
+  constructor(
+    @Inject(LlmService) private readonly llm: LlmService,
+    @Inject(UsersService) private readonly users: UsersService,
+    @Inject(MessageLogService) private readonly messageLog: MessageLogService,
+  ) {}
 
   async onModuleInit() {
     this.logger.log(
@@ -67,6 +73,18 @@ export class MessagingService implements OnModuleInit {
     this.logger.log(
       `[${message.platform}] ${message.senderName} (${message.chatId}): ${message.type} — ${message.text?.slice(0, 100) ?? "(no text)"}`,
     );
+
+    // Log incoming message for audit/history
+    if (message.dbUserId) {
+      this.messageLog.log({
+        userId: message.dbUserId,
+        platform: message.platform,
+        platformMsgId: message.id,
+        direction: "in",
+        type: message.type,
+        text: message.text ?? null,
+      });
+    }
 
     // Route through deep agent orchestrator if registered
     if (this.messageProcessor) {
@@ -138,6 +156,22 @@ export class MessagingService implements OnModuleInit {
       return;
     }
     await adapter.sendMessage(message);
+
+    // Log outgoing message — best-effort lookup by chatId
+    try {
+      const user = this.users.findByChatId(platform, message.chatId);
+      if (user) {
+        this.messageLog.log({
+          userId: user.id,
+          platform,
+          direction: "out",
+          type: message.type,
+          text: message.text ?? message.caption ?? null,
+        });
+      }
+    } catch (e) {
+      this.logger.debug(`Outgoing log skipped: ${e}`);
+    }
   }
 
   /**
