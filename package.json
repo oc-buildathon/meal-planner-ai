@@ -1,0 +1,8 @@
+{
+  "name": "meal-planner-ai",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "bun run --filter @meal-planner/backend dev"
+  }
+}
