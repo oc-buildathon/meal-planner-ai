@@ -7,6 +7,7 @@ import { MessagingModule } from "./messaging/messaging.module";
 import { AgentsModule } from "./agents/agents.module";
 import { WhatsAppModule } from "./whatsapp/whatsapp.module";
 import { TelegramModule } from "./telegram/telegram.module";
+import { WebAppModule } from "./webapp/webapp.module";
 import configuration from "./config/configuration";
 
 @Module({
@@ -25,6 +26,7 @@ import configuration from "./config/configuration";
     AgentsModule,  // Deep agent brain — must come after MessagingModule
     WhatsAppModule,
     TelegramModule,
+    WebAppModule,
   ],
   controllers: [AppController],
 })

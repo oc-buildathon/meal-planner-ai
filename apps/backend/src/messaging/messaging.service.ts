@@ -9,6 +9,7 @@ import type {
 import { LlmService } from "../llm/llm.service";
 import { UsersService } from "../database/users.service";
 import { MessageLogService } from "../database/message-log.service";
+import { normalizeToChatFormat } from "./formatting";
 
 /**
  * Callback signature for the deep agent orchestrator.
@@ -148,6 +149,12 @@ export class MessagingService implements OnModuleInit {
 
   /**
    * Send a message through a specific platform adapter.
+   *
+   * Text and captions are passed through `normalizeToChatFormat` so any
+   * GitHub-flavored markdown from the LLM is squashed into a clean
+   * cross-platform dialect before the adapter sees it. Adapter then
+   * applies its own platform-specific rendering (e.g. Telegram converts
+   * to HTML; WhatsApp sends as-is).
    */
   async sendMessage(message: OutgoingMessage, platform: Platform) {
     const adapter = this.adapters.get(platform);
@@ -155,7 +162,15 @@ export class MessagingService implements OnModuleInit {
       this.logger.warn(`No adapter registered for platform: ${platform}`);
       return;
     }
-    await adapter.sendMessage(message);
+
+    const prepared: OutgoingMessage = {
+      ...message,
+      text: message.text ? normalizeToChatFormat(message.text) : message.text,
+      caption: message.caption
+        ? normalizeToChatFormat(message.caption)
+        : message.caption,
+    };
+    await adapter.sendMessage(prepared);
 
     // Log outgoing message — best-effort lookup by chatId
     try {
@@ -166,7 +181,7 @@ export class MessagingService implements OnModuleInit {
           platform,
           direction: "out",
           type: message.type,
-          text: message.text ?? message.caption ?? null,
+          text: prepared.text ?? prepared.caption ?? null,
         });
       }
     } catch (e) {
