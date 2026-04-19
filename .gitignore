@@ -143,3 +143,10 @@ bun.lockb
 
 # WhatsApp auth sessions (Baileys)
 auth_sessions/
+
+# SQLite database files
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

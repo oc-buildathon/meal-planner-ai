@@ -16,6 +16,7 @@ import type {
   MessageContentType,
 } from "../messaging/messaging.types";
 import { MessagingService } from "../messaging/messaging.service";
+import { UsersService } from "../database/users.service";
 
 @Injectable()
 export class TelegramService
@@ -32,6 +33,7 @@ export class TelegramService
   constructor(
     @Inject(ConfigService) private readonly config: ConfigService,
     @Inject(MessagingService) private readonly messagingService: MessagingService,
+    @Inject(UsersService) private readonly users: UsersService,
   ) {}
 
   async onModuleInit() {
@@ -245,6 +247,25 @@ export class TelegramService
     const isGroup =
       msg.chat.type === "group" || msg.chat.type === "supergroup";
 
+    // Persist user (and bump last_seen / message_count) before routing.
+    let dbUserId: number | undefined;
+    try {
+      const userRow = this.users.upsert({
+        platform: "telegram",
+        platformUserId: senderId,
+        chatId,
+        username: ctx.from.username ?? null,
+        firstName: ctx.from.first_name ?? null,
+        lastName: ctx.from.last_name ?? null,
+        languageCode: ctx.from.language_code ?? null,
+        isBot: !!ctx.from.is_bot,
+        isGroup,
+      });
+      dbUserId = userRow.id;
+    } catch (e) {
+      this.logger.warn(`User upsert failed for ${senderId}: ${e}`);
+    }
+
     let text: string | undefined;
     let media: Buffer | undefined;
     let mediaMimeType: string | undefined;
@@ -339,6 +360,7 @@ export class TelegramService
       location,
       timestamp: new Date(msg.date * 1000),
       raw: msg,
+      dbUserId,
     };
   }
 }
