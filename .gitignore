@@ -145,7 +145,7 @@ bun.lockb
 auth_sessions/
 
 # SQLite database files
-data/
+# data/
 *.db
 *.db-journal
 *.db-wal
