@@ -140,3 +140,6 @@ vite.config.ts.timestamp-*
 
 # Bun
 bun.lockb
+
+# WhatsApp auth sessions (Baileys)
+auth_sessions/
