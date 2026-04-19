@@ -14,13 +14,12 @@ export class LlmService implements OnModuleInit {
   private readonly logger = new Logger(LlmService.name);
   private chat!: ChatOpenAI;
 
-  constructor(@Inject(ConfigService) private readonly config: ConfigService) {}
+  constructor(@Inject(ConfigService) private readonly config: ConfigService) { }
 
   onModuleInit() {
     const baseUrl = this.config.get<string>("LLM_BASE_URL")!;
     const apiKey = this.config.get<string>("LLM_API_KEY")!;
     const model = this.config.get<string>("LLM_MODEL")!;
-    const temperature = this.config.get<number>("LLM_TEMPERATURE")!;
 
     this.chat = new ChatOpenAI({
       configuration: {
@@ -28,7 +27,6 @@ export class LlmService implements OnModuleInit {
       },
       openAIApiKey: apiKey,
       modelName: model,
-      temperature,
     });
 
     this.logger.log(

@@ -1,12 +1,17 @@
 export default () => ({
   port: parseInt(process.env.PORT ?? "3000", 10),
 
-  // LLM — OpenAI-compatible endpoint (works with any provider: OpenRouter, Ollama, vLLM, LiteLLM, etc.)
+  // Deep Agent model — uses "provider:model" format (e.g. "openai:gpt-4o", "anthropic:claude-sonnet-4-6")
+  // The provider's API key env var must also be set (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+  agent: {
+    model: process.env.AGENT_MODEL ?? "openai:gpt-4o",
+  },
+
+  // LLM — OpenAI-compatible endpoint (fallback, used when agent is not initialized)
   llm: {
     baseUrl: process.env.LLM_BASE_URL ?? "https://api.openai.com/v1",
     apiKey: process.env.LLM_API_KEY ?? "",
     model: process.env.LLM_MODEL ?? "gpt-4o",
-    temperature: parseFloat(process.env.LLM_TEMPERATURE ?? "0.7"),
   },
 
   // WhatsApp (Baileys)

@@ -3,6 +3,7 @@ import { ConfigModule } from "@nestjs/config";
 import { AppController } from "./app.controller";
 import { LlmModule } from "./llm/llm.module";
 import { MessagingModule } from "./messaging/messaging.module";
+import { AgentsModule } from "./agents/agents.module";
 import { WhatsAppModule } from "./whatsapp/whatsapp.module";
 import { TelegramModule } from "./telegram/telegram.module";
 import configuration from "./config/configuration";
@@ -19,6 +20,7 @@ import configuration from "./config/configuration";
     }),
     LlmModule,
     MessagingModule,
+    AgentsModule,  // Deep agent brain — must come after MessagingModule
     WhatsAppModule,
     TelegramModule,
   ],
